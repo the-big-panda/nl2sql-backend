@@ -1,1 +1,10 @@
-/node_modules
+# .gitignore
+
+# Node modules
+node_modules/
+
+# Environment variables
+/.env
+
+# Dependency lock file (optional, if you don’t want to commit it)
+/package-lock.json

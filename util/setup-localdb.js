@@ -57,11 +57,11 @@ async function setupLocalDB(dbType) {
   // 4️⃣ Define UserInfo model
   const UserInfo = db.define("userinfo", {
     user_id: {
-      type: DataTypes.UUIDV4,
+      type: DataTypes.TEXT,
       unique: true,
       allowNull: false,
       primaryKey: true,
-      defaultValue: DataTypes.UUIDV4,
+      
     },
     username: { type: DataTypes.STRING, allowNull: false },
     useremail: { type: DataTypes.STRING, allowNull: false, unique: true },
@@ -70,7 +70,7 @@ async function setupLocalDB(dbType) {
 
   const databaseInfo = db.define("dbinfo", {
     user_id: {
-      type: DataTypes.UUID,
+      type: DataTypes.TEXT,
       allowNull: false,
       references: {
         model: "userinfos", // 👈 must match the actual table name

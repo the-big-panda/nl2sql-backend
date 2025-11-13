@@ -1,0 +1,108 @@
+{
+  "dbinfos": [
+    {
+      "column": "id",
+      "type": "integer",
+      "nullable": "NO",
+      "default": "nextval('dbinfos_id_seq'::regclass)"
+    },
+    {
+      "column": "user_id",
+      "type": "text",
+      "nullable": "NO",
+      "default": null
+    },
+    {
+      "column": "db_workspace",
+      "type": "text",
+      "nullable": "NO",
+      "default": null
+    },
+    {
+      "column": "db_service",
+      "type": "text",
+      "nullable": "NO",
+      "default": null
+    },
+    {
+      "column": "db_host",
+      "type": "text",
+      "nullable": "NO",
+      "default": null
+    },
+    {
+      "column": "db_user",
+      "type": "text",
+      "nullable": "NO",
+      "default": null
+    },
+    {
+      "column": "db_password",
+      "type": "text",
+      "nullable": "NO",
+      "default": null
+    },
+    {
+      "column": "db_name",
+      "type": "text",
+      "nullable": "NO",
+      "default": null
+    },
+    {
+      "column": "createdAt",
+      "type": "timestamp with time zone",
+      "nullable": "NO",
+      "default": "now()"
+    },
+    {
+      "column": "updatedAt",
+      "type": "timestamp with time zone",
+      "nullable": "NO",
+      "default": "now()"
+    }
+  ],
+  "userinfos": [
+    {
+      "column": "id",
+      "type": "integer",
+      "nullable": "NO",
+      "default": "nextval('userinfos_id_seq'::regclass)"
+    },
+    {
+      "column": "user_id",
+      "type": "text",
+      "nullable": "NO",
+      "default": null
+    },
+    {
+      "column": "username",
+      "type": "character varying",
+      "nullable": "NO",
+      "default": null
+    },
+    {
+      "column": "useremail",
+      "type": "character varying",
+      "nullable": "NO",
+      "default": null
+    },
+    {
+      "column": "user_password",
+      "type": "character varying",
+      "nullable": "NO",
+      "default": null
+    },
+    {
+      "column": "createdAt",
+      "type": "timestamp with time zone",
+      "nullable": "NO",
+      "default": null
+    },
+    {
+      "column": "updatedAt",
+      "type": "timestamp with time zone",
+      "nullable": "NO",
+      "default": null
+    }
+  ]
+}

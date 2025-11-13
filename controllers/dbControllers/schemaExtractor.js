@@ -9,7 +9,8 @@ import fs from "fs";
  * @param {string} outputPath - Optional path to save JSON schema.
  * @returns {Promise<object>} The schema object.
  */
-export async function extractSchema(dbType, config, outputPath = null) {
+export async function extractSchema(dbType, config) {
+  console.log("\nExtracting Schema\n")
   let rows;
 
   if (dbType === "mysql") {
@@ -31,6 +32,7 @@ export async function extractSchema(dbType, config, outputPath = null) {
   }
 
   else if (dbType === "postgres") {
+
     const client = new PgClient({
       host: config.host,
       user: config.user,
@@ -66,11 +68,13 @@ export async function extractSchema(dbType, config, outputPath = null) {
     });
   }
 
+
+
   // Optionally save to file
-  if (outputPath) {
+  
     fs.writeFileSync(outputPath, JSON.stringify(schema, null, 2));
     console.log(`✅ Schema exported to ${outputPath}`);
-  }
+
 
   return schema;
 }

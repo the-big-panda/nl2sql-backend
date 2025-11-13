@@ -9,6 +9,7 @@ const authenticateToken = (req,res,next) => {
     // if(!token) return res.status(401).send("Access Denied");
     try {
         const decodedBody = jwt.verify(token,process.env.ACCESS_TOKEN);
+        console.log(`\n\n ${decodedBody.userID} \n`)
         req.user = decodedBody;
         next();
     } catch (error) {

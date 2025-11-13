@@ -79,9 +79,13 @@ async function setupLocalDB(dbType) {
       onDelete: "CASCADE", // optional: delete dbinfo if user deleted
       onUpdate: "CASCADE",
     },
+    
+    db_workspace:{ type: DataTypes.TEXT, allowNull: false },
     db_service: { type: DataTypes.TEXT, allowNull: false },
+    db_host:{ type: DataTypes.TEXT, allowNull: false },
     db_user: { type: DataTypes.TEXT, allowNull: false },
     db_password: { type: DataTypes.TEXT, allowNull: false },
+    db_name: { type: DataTypes.TEXT, allowNull: false },
   });
 
   // 5️⃣ Sync model (creates table if not exists)
@@ -104,4 +108,4 @@ async function setupLocalDB(dbType) {
   return db; // ✅ Return it for usage if needed
 }
 
-module.exports = { setupLocalDB, db };
+module.exports = { setupLocalDB};

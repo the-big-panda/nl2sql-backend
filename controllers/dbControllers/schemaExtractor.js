@@ -1,6 +1,6 @@
-import mysql from "mysql2/promise";
-import { Client as PgClient } from "pg";
-import fs from "fs";
+const mysql = require("mysql2/promise");
+const { Client: PgClient } = require("pg");
+const fs = require("fs");
 
 /**
  * Extracts the database schema for either MySQL or PostgreSQL.
@@ -9,7 +9,7 @@ import fs from "fs";
  * @param {string} outputPath - Optional path to save JSON schema.
  * @returns {Promise<object>} The schema object.
  */
-export async function extractSchema(dbType, config) {
+ async function extractSchema(dbType, config) {
   console.log("\nExtracting Schema\n")
   let rows;
 
@@ -72,9 +72,11 @@ export async function extractSchema(dbType, config) {
 
   // Optionally save to file
   
-    fs.writeFileSync(outputPath, JSON.stringify(schema, null, 2));
-    console.log(`✅ Schema exported to ${outputPath}`);
+    // fs.writeFileSync(outputPath, JSON.stringify(schema, null, 2));
+    // console.log(`✅ Schema exported to ${outputPath}`);
 
 
   return schema;
 }
+
+module.exports = extractSchema

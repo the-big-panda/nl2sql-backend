@@ -1,11 +1,9 @@
 const { generateToken } = require("../../util/userAuth");
 const { getAvailableDB } = require("../../util/check-db");
-const { db } = require("../../util/setup-localdb"); // Sequelize instance
 const pg_db = require("../../database/postgresConfig");
 const { v4: uuidv4 } = require("uuid");
-;
 
-async function handleUserLogin(req, res, db) {
+async function handleUserLogin(req, res) {
   const { useremail, userPassword } = req.body;
   try {
     if (!useremail || !userPassword) {
@@ -60,7 +58,7 @@ async function handleUserRegistration(req, res) {
     if (!username || !useremail || !userpassword) {
       return res
         .status(400)
-        .json({ error: "All Details are required required" });
+        .json({ error: "All Details are required" });
     }
 
     // ✅ Query user by email

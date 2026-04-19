@@ -1,9 +1,9 @@
 const pg_db = require("../../database/postgresConfig");
 const { Client: PGClient } = require("pg");
 const mysql = require("mysql2/promise");
-const { extractSchema } = require("../dbControllers/schemaExtractor");
-const { fetchQuery, schemaUpload } = require("../llmControllers/llmConfig");
-const { handleQueryExecution } = require("../llmControllers/queryController");
+const extractSchema = require("../dbControllers/schemaExtractor");
+const { fetchQuery, schemaUpload, getConversationHistory } = require("../llmControllers/llmConfig");
+const  handleQueryExecution  = require("../llmControllers/queryController");
 
 async function handleAddWorkSpaces(req, res) {
   const { workspaceName, db_host, db_user, db_password, db_service, db_name } =
@@ -50,7 +50,9 @@ async function handleAddWorkSpaces(req, res) {
     // Insert new workspace into dbinfos table
     if (db_service === "postgres") {
       await pg_db.query(
-        "INSERT INTO dbinfos (user_id, db_workspace, db_host, db_service, db_user, db_password, db_name) VALUES ($1, $2, $3, $4, $5, $6, $7);",
+        `INSERT INTO dbinfos 
+   (user_id, db_workspace, db_host, db_service, db_user, db_password, db_name, "createdAt", "updatedAt") 
+   VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW());`,
         [
           user_id,
           workspaceName,
@@ -95,20 +97,20 @@ async function handleGetWorkspaces(req, res) {
     // Fetch all workspaces for this user
     if (process.env.LOCAL_DB_TYPE === "postgres") {
       const result = await pg_db.query(
-        "SELECT * FROM dbinfos WHERE user_id = $1;",
+        "SELECT * FROM workspace WHERE user_id = $1;",
         [user_id]
       );
       workspaces = result.rows;
     } else {
       const [result] = await mysql_db
         .promise()
-        .query("SELECT * FROM dbinfos WHERE user_id = ?;", [user_id]);
+        .query("SELECT * FROM workspace WHERE user_id = ?;", [user_id]);
       workspaces = result;
     }
 
     //  If no workspaces exist, return empty array
     if (!workspaces || workspaces.length === 0) {
-      return res.status(200).json([]);
+      return res.status(200).json({ messages: "No workspaces found. Please add a workspace." });
     }
 
     // Return all workspaces
@@ -128,39 +130,68 @@ async function handleConnectWorkspaces(req, res) {
     }
     const user_id = req.user.userID;
 
-    // Fetch workspace
-    const query = `
-      SELECT *
-      FROM dbinfos
-      WHERE user_id = $1 AND db_name = $2
-    `;
+    // Fetch workspace details from workspace table
+    let workspace = null;
 
-    const result = await pg_db.query(query, [user_id, db_name]);
+    if (process.env.LOCAL_DB_TYPE === "postgres") {
+      const result = await pg_db.query(
+        "SELECT * FROM workspace WHERE user_id = $1 AND db_id = $2;",
+        [user_id, db_name]
+      );
+      workspace = result.rows[0] || null;
+    } else {
+      const [result] = await mysql_db
+        .promise()
+        .query("SELECT * FROM workspace WHERE user_id = ? AND db_id = ?;", [
+          user_id,
+          db_name,
+        ]);
+      workspace = result && result[0] ? result[0] : null;
+    }
 
-    if (result.rowCount === 0) {
+    if (!workspace) {
       return res.status(404).json({
-        message: "Workspace not found for this user.",
+        message: "Workspace not found for this user. Please add a workspace first.",
       });
     }
 
-    const workspace = result.rows[0];
+    // Fetch database connection details from dbinfos table
+    let dbInfo = null;
 
-    // Extract details
+    if (process.env.LOCAL_DB_TYPE === "postgres") {
+      const result = await pg_db.query(
+        "SELECT * FROM dbinfos WHERE db_workspace = $1;",
+        [workspace.workspace_id]
+      );
+      dbInfo = result.rows[0] || null;
+    } else {
+      const [result] = await mysql_db
+        .promise()
+        .query("SELECT * FROM dbinfos WHERE db_workspace = ?;", [
+          workspace.workspace_id,
+        ]);
+      dbInfo = result && result[0] ? result[0] : null;
+    }
+
+    if (!dbInfo) {
+      return res.status(404).json({
+        message: "Database connection details not found.",
+      });
+    }
+
+    // Extract database connection details
     const {
       db_service,
       db_host,
       db_user,
       db_password,
       db_name: workspaceDBName,
-    } = workspace;
+    } = dbInfo;
 
     let connection;
     let connectStatus = false;
 
-    // ------------------------------------------
-    // 🔥 AUTO CONNECT BASED ON db_service
-    // ------------------------------------------
-
+    //Autoconnect db
     if (db_service === "postgres") {
       connection = new PGClient({
         host: db_host,
@@ -188,11 +219,6 @@ async function handleConnectWorkspaces(req, res) {
       });
     }
 
-    // --------------------------------------
-    // SUCCESS RESPONSE (do NOT send client object directly)
-    // ------------------
-    // --------------------
-    //return connection;
     config = {
       host: db_host,
       user: db_user,
@@ -201,15 +227,23 @@ async function handleConnectWorkspaces(req, res) {
     };
     const schema = await extractSchema(db_service, config);
     await schemaUpload(db_service, config, schema);
+
+    // Fetch conversation history (all messages for this workspace)
+    const conversationResult = await getConversationHistory(workspace.workspace_id);
+    const messages = conversationResult.success ? conversationResult.messages : [];
+
     return res.status(200).json({
       message: "Connection successful",
       connection_status: connectStatus,
+      workspace_id: workspace.workspace_id,
       db_service,
       connection_info: {
         host: db_host,
         user: db_user,
         db_name: workspaceDBName,
       },
+      conversation_history: messages,
+      message_count: messages.length,
     });
   } catch (error) {
     console.error("Connect Workspace Error:", error);
@@ -225,12 +259,14 @@ async function handleWorkspaceQuery(req, res) {
   try {
     const response = await fetchQuery(db_name, nl_query);
     if (!response.success) {
-      console.error("SQL Query Fetch Error:", error);
+      console.error("SQL Query Fetch Error:", response.error);
+
       return res.status(400).json({
         message: "Failed to fetch sql query",
-        error: error.message,
+        error: response.error,
       });
     }
+
     const user_id = req.user.userID;
 
     const results = await handleQueryExecution(
@@ -240,16 +276,16 @@ async function handleWorkspaceQuery(req, res) {
     );
 
     if (!results.success) {
-      console.error("SQL Query Execution Error:", error);
+      console.error("SQL Query Execution Error:", results.error);
       return res.status(400).json({
         message: "Failed to execute sql query",
-        error: error.message,
+        error: results.error,
       });
     }
 
     return res.status(200).json({
-      result : results,
-      sql_query : response.sql_query,
+      result: results,
+      sql_query: response.sql_query,
     });
   } catch (error) {
     console.error("Connect Workspace Error:", error);
@@ -260,9 +296,10 @@ async function handleWorkspaceQuery(req, res) {
   }
 }
 
+
 module.exports = {
   handleAddWorkSpaces,
   handleGetWorkspaces,
   handleConnectWorkspaces,
-  handleWorkspaceQuery
+  handleWorkspaceQuery,
 };

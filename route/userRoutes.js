@@ -1,6 +1,5 @@
 const express = require('express');
 const { handleUserLogin, handleUserRegistration } = require('../controllers/userControllers/loginController');
-const { db } = require('../util/setup-localdb');
 
 const router = express.Router();
 

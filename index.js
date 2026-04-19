@@ -2,6 +2,7 @@ const express = require('express')
 const { getAvailableDB } = require("./util/check-db");
 const { setupLocalDB } = require('./util/setup-localdb');
 var cors = require('cors')
+require('dotenv').config();
 
 const app = express();
 
@@ -11,26 +12,30 @@ app.use(express.json());
 // (optional but common) to handle URL-encoded forms
 app.use(express.urlencoded({ extended: true }));
 
+// CORS configuration from environment
+const corsOrigins = (process.env.CORS_ORIGIN || 'http://localhost:8000').split(',');
 var corsOptions = {
-  origin: 'http://localhost:8000',
-  //optionsSuccessStatus: 200 // some legacy browsers (IE11, various SmartTVs) choke on 204
+  origin: corsOrigins,
 }
  
 app.use(cors(corsOptions));
 
 (async () => {
   try {
+    // Detect which database is available
     const dbType = await getAvailableDB();
 
-    if (dbType) {
-      console.log(`${dbType.toUpperCase()} detected — setting up local setup DB...`);
-      await setupLocalDB(dbType);
-    } else {
-      console.log("No supported database (MySQL or PostgreSQL) is running.");
+    if (!dbType) {
+      console.error("No supported database (MySQL or PostgreSQL) is running.");
+      console.error("Please start MySQL or PostgreSQL and try again.");
+      process.exit(1);
     }
 
-    const db = await setupLocalDB("postgres"); // initialize db
-    app.set("db", db); // store in app context
+    console.log(`✅ ${dbType.toUpperCase()} detected — setting up connection...`);
+    
+    // Setup and connect to the available database
+    const db = await setupLocalDB(dbType);
+    app.set("db", db); // Store in app context for routes to use
 
     // Register routes AFTER database is ready
     const userRoutes = require('./route/userRoutes');
@@ -40,9 +45,11 @@ app.use(cors(corsOptions));
     app.use('/workspace', workspaceRoutes);
 
     // Start server AFTER everything is set up
-    app.listen(8080, () => {
-      console.log("Application running on port 8080");
-      console.log("Database connected and routes registered");
+    const PORT = process.env.PORT || 8080;
+    app.listen(PORT, () => {
+      console.log(`🚀 Application running on port ${PORT}`);
+      console.log(`📊 Database: ${dbType.toUpperCase()} connected`);
+      console.log("✅ Routes registered and ready");
     });
   } catch (error) {
     console.error("Failed to start server:", error);

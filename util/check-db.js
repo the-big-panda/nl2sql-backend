@@ -1,42 +1,39 @@
-// check-dbs.js
+// util/check-db.js
 const mysql = require("mysql2/promise");
 const { Client } = require("pg");
 
-async function checkMySQL() {
-  try {
-    const conn = await mysql.createConnection({
-      host: "localhost",
-      user: "root",
-      password: ""
-    });
-    await conn.end();
-    return true;
-  } catch {
-    return false;
-  }
-}
+async function getAvailableDB() {
 
-async function checkPostgres() {
-  const client = new Client({
-    host: "localhost",
-    user: "postgres",
-    password: "",
-    port: 5432,
-  });
-  try {
+   try {
+    const client = new Client({
+      host: "localhost",
+      user: "postgres",
+      password: "",
+      database: "postgres",
+    });
     await client.connect();
     await client.end();
-    return true;
-  } catch {
-    return false;
+    return "postgres";
+  } catch (err) {
+    // PostgreSQL not available
   }
-}
+  // Try MySQL first
+  try {
+    const connection = await mysql.createConnection({
+      host: "localhost",
+      user: "root",
+      password: "424354",
+    });
+    await connection.end();
+    return "mysql";
+  } catch (err) {
+    // MySQL not available, try PostgreSQL
+  }
 
-async function getAvailableDB() {
-  const [mysqlUp, pgUp] = await Promise.all([checkMySQL(), checkPostgres()]);
-  if (mysqlUp) return "mysql";
-  if (pgUp) return "postgres";
-  return null;
+  // Try PostgreSQL
+ 
+
+  return null; // No database available
 }
 
 module.exports = { getAvailableDB };

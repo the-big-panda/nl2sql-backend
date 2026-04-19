@@ -1,8 +1,10 @@
-import mysql from "mysql2/promise";
-import { Client as PGClient } from "pg";
-import pg_db from "../util/pg-pool.js"; // adjust path
+ // adjust path
 
-export async function handleQueryExecution(db_name, user_id, sql_query) {
+const mysql_db = require("../../database/mysqlConfig");
+const pg_db = require("../../database/postgresConfig");
+const { Client } = require("pg");
+
+ async function handleQueryExecution(db_name, user_id, sql_query) {
   try {
     if (!db_name || !user_id || !sql_query) {
       return {
@@ -43,7 +45,7 @@ export async function handleQueryExecution(db_name, user_id, sql_query) {
 
     // Connect and execute query based on db type
     if (db_service === "postgres") {
-      connection = new PGClient({
+      connection = new Client({
         host: db_host,
         user: db_user,
         password: db_password,
@@ -61,7 +63,7 @@ export async function handleQueryExecution(db_name, user_id, sql_query) {
     }
 
     else if (db_service === "mysql") {
-      connection = await mysql.createConnection({
+      connection = await mysql_db.createConnection({
         host: db_host,
         user: db_user,
         password: db_password,

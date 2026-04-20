@@ -162,7 +162,7 @@ async function getNextSequenceNumber(workspace_id) {
 async function getConversationHistory(workspace_id, limit = 50) {
   try {
     if (!workspace_id) {
-      throw new Error("workspace_id is required");
+      return { success: true, messages: [] }; // No workspace_id, return empty
     }
 
     if (process.env.LOCAL_DB_TYPE === "postgres") {
@@ -185,8 +185,9 @@ async function getConversationHistory(workspace_id, limit = 50) {
       return { success: true, messages: result };
     }
   } catch (error) {
-    console.error("Get Conversation History Error:", error.message);
-    return { success: false, error: error.message };
+    console.warn(`⚠️ Conversation history fetch failed (non-blocking - table may not exist): ${error.message}`);
+    // Don't fail - return empty messages, not critical
+    return { success: true, messages: [] };
   }
 }
 

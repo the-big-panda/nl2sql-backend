@@ -1,4 +1,4 @@
-const pg_db = require("../../database/postgresConfig");
+const pg_db = require("../database/postgresConfig");
 const mysql = require("mysql2/promise");
 
 /**

@@ -44,7 +44,12 @@ async function handleUserLogin(req, res) {
     // Check database availability (utility function)
     getAvailableDB();
 
-    return res.json({ token });
+    return res.json({ 
+      token,
+      userID: user.user_id,
+      userName: user.username,
+      useremail: user.useremail
+    });
   } catch (error) {
     console.log("Login Error Occured", error);
     return res.status(500).send("Internal server error");
@@ -78,6 +83,20 @@ async function handleUserRegistration(req, res) {
     [user_id, username, useremail, userpassword]
     );
 
+    // ✅ Create default workspace for new user
+    try {
+      const { v4: uuidv4 } = require('uuid');
+      const workspace_id = uuidv4();
+      
+      await pg_db.query(
+        "INSERT INTO workspace (workspace_id, user_id, db_id, title, status) VALUES ($1, $2, $3, $4, $5)",
+        [workspace_id, user_id, 'default', `${username}'s Workspace`, 'pending']
+      );
+      console.log("✅ Default workspace created for new user");
+    } catch (workspaceError) {
+      console.log("⚠️ Default workspace creation warning:", workspaceError.message);
+      // Don't fail registration if workspace creation fails
+    }
 
     let token = generateToken({
       userID: user_id,
@@ -95,7 +114,10 @@ async function handleUserRegistration(req, res) {
 
     return res.status(201).json({
       message: "User registered successfully",
-      token : token 
+      token,
+      userID: user_id,
+      userName: username,
+      useremail
     });
   } catch (error) {
     console.log("Registration Error Occurred:", error);

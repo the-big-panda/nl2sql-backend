@@ -43,8 +43,11 @@ const { Client } = require("pg");
     let rows;
     let fields;
 
+    // Normalize db_service: accept both "postgres" and "postgresql"
+    const isPostgres = db_service === "postgres" || db_service === "postgresql";
+
     // Connect and execute query based on db type
-    if (db_service === "postgres") {
+    if (isPostgres) {
       connection = new Client({
         host: db_host,
         user: db_user,

@@ -13,6 +13,9 @@ const fs = require("fs");
   console.log("\nExtracting Schema\n")
   let rows;
 
+  // Normalize dbType: accept both "postgres" and "postgresql"
+  const isPostgres = dbType === "postgres" || dbType === "postgresql";
+
   if (dbType === "mysql") {
     const conn = await mysql.createConnection({
       host: config.host,
@@ -31,7 +34,7 @@ const fs = require("fs");
     await conn.end();
   }
 
-  else if (dbType === "postgres") {
+  else if (isPostgres) {
 
     const client = new PgClient({
       host: config.host,
@@ -53,7 +56,7 @@ const fs = require("fs");
   }
 
   else {
-    throw new Error("Unsupported dbType. Use 'mysql' or 'postgres'.");
+    throw new Error("Unsupported dbType. Use 'mysql' or 'postgres' or 'postgresql'.");
   }
 
   // Build schema object

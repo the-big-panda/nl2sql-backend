@@ -1,9 +1,12 @@
 const pg_db = require("../../database/postgresConfig");
 const { Client: PGClient } = require("pg");
 const mysql = require("mysql2/promise");
+const mysql_db = require("../../database/mysqlConfig");
 const extractSchema = require("../dbControllers/schemaExtractor");
 const { fetchQuery, schemaUpload, getConversationHistory } = require("../llmControllers/llmConfig");
 const  handleQueryExecution  = require("../llmControllers/queryController");
+const { createContainerOnCloudBackend } = require("../../util/cloudBackendClient");
+const { createUserContainer } = require("../../services/containerService");
 
 async function handleAddWorkSpaces(req, res) {
   const { workspaceName, db_host, db_user, db_password, db_service, db_name } =
@@ -24,10 +27,14 @@ async function handleAddWorkSpaces(req, res) {
 
     const user_id = req.user.userID;
     console.log(`\n\n ${req.user} \n\n`);
+    
+    // Normalize db_service: accept both "postgres" and "postgresql"
+    const isPostgres = db_service === "postgres" || db_service === "postgresql";
+    
     let existingWorkspace = null;
 
     // 🔍 Check if workspace already exists
-    if (db_service === "postgres") {
+    if (isPostgres) {
       const result = await pg_db.query(
         "SELECT * FROM dbinfos WHERE user_id = $1 AND db_name = $2;",
         [user_id, db_name]
@@ -47,8 +54,28 @@ async function handleAddWorkSpaces(req, res) {
       return res.status(409).send("Workspace already exists.");
     }
 
-    // Insert new workspace into dbinfos table
-    if (db_service === "postgres") {
+    // Generate UUID for workspace_id
+    const { v4: uuidv4 } = require('uuid');
+    const workspace_id = uuidv4();
+
+    // Insert into workspace table (using existing schema with uuid)
+    if (isPostgres) {
+      await pg_db.query(
+        `INSERT INTO workspace (workspace_id, user_id, db_id, title, status, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, NOW(), NOW());`,
+        [workspace_id, user_id, db_name, workspaceName, "connected"]
+      );
+    } else {
+      await mysql_db
+        .promise()
+        .query(
+          "INSERT INTO workspace (workspace_id, user_id, db_id, title, status) VALUES (?, ?, ?, ?, ?);",
+          [workspace_id, user_id, db_name, workspaceName, "connected"]
+        );
+    }
+
+    // Insert into dbinfos table (database configuration)
+    if (isPostgres) {
       await pg_db.query(
         `INSERT INTO dbinfos 
    (user_id, db_workspace, db_host, db_service, db_user, db_password, db_name, "createdAt", "updatedAt") 
@@ -81,7 +108,80 @@ async function handleAddWorkSpaces(req, res) {
     }
 
     console.log(`Workspace '${workspaceName}' added successfully.`);
-    return res.status(200).send("Workspace added successfully.");
+    
+    // Request container creation from cloud-backend
+    console.log(`[Container] Requesting container for user ${user_id}...`);
+    let containerInfo = null;
+    const containerResult = await createContainerOnCloudBackend(user_id);
+    
+    if (containerResult.success) {
+      if (containerResult.container_id && containerResult.container_id !== "unknown" && containerResult.container_id !== null) {
+        // Container was successfully created on cloud-backend
+        console.log(`✅ Container created on cloud-backend for user: ${user_id}`);
+        console.log(`   Container ID: ${containerResult.container_id}`);
+        console.log(`   Container URL: ${containerResult.container_url}`);
+        
+        // Try to store container info in local database
+        if (containerResult.container_url) {
+          const storeResult = await createUserContainer(
+            user_id,
+            containerResult.container_id,
+            containerResult.container_url,  // Use URL as host
+            9000,  // Default port
+            containerResult.container_url   // WS URL
+          );
+          
+          if (storeResult.success) {
+            containerInfo = {
+              container_id: containerResult.container_id,
+              container_name: containerResult.container_name,
+              container_url: containerResult.container_url,
+              is_new: containerResult.is_new,
+              token: containerResult.token,
+            };
+            console.log(`✅ Container info stored locally for user: ${user_id}`);
+          } else {
+            console.warn(`⚠️ Container created but not stored locally: ${storeResult.error}`);
+          }
+        }
+      } else {
+        // Token generated but container not created (Kubernetes unavailable)
+        console.log(`✅ Authentication token generated for user: ${user_id}`);
+        console.log(`⚠️ Container service unavailable on cloud-backend`);
+        if (containerResult.warning) {
+          console.log(`   Reason: ${containerResult.warning}`);
+        }
+        console.log(`   Workspace will still function without containerized LLM access`);
+        
+        // Store token for future use even without container
+        containerInfo = {
+          auth_token: containerResult.token,
+          container_available: false,
+          message: containerResult.warning || "Container service unavailable",
+        };
+      }
+    } else {
+      console.warn(`⚠️ Container request failed: ${containerResult.error}`);
+      // Continue without container - workspace still functions
+    }
+    
+    // Return the created workspace
+    return res.status(201).json({
+      id: workspace_id,
+      name: workspaceName,
+      workspace_id: workspace_id,
+      user_id: user_id,
+      db_id: db_name,
+      status: "connected",
+      container_info: containerInfo,
+      dbConfig: {
+        host: db_host,
+        user: db_user,
+        password: db_password,
+        service: db_service,
+        database: db_name,
+      }
+    });
   } catch (error) {
     console.error(" Add Workspace Error:", error);
     return res.status(500).send("Internal server error");
@@ -94,27 +194,78 @@ async function handleGetWorkspaces(req, res) {
 
     let workspaces = [];
 
-    // Fetch all workspaces for this user
+    // Fetch all workspaces for this user with their database config
     if (process.env.LOCAL_DB_TYPE === "postgres") {
+      // Join workspace with dbinfos to get complete info
       const result = await pg_db.query(
-        "SELECT * FROM workspace WHERE user_id = $1;",
+        `SELECT 
+          w.workspace_id, 
+          w.user_id,
+          w.db_id,
+          w.title AS name,
+          w.status,
+          w.created_at,
+          d.db_host,
+          d.db_user,
+          d.db_password,
+          d.db_service,
+          d.db_name
+        FROM workspace w
+        LEFT JOIN dbinfos d ON w.db_id = d.db_name AND w.user_id = d.user_id
+        WHERE w.user_id = $1
+        ORDER BY w.created_at DESC;`,
         [user_id]
       );
       workspaces = result.rows;
     } else {
       const [result] = await mysql_db
         .promise()
-        .query("SELECT * FROM workspace WHERE user_id = ?;", [user_id]);
+        .query(
+          `SELECT 
+            w.workspace_id, 
+            w.user_id,
+            w.db_id,
+            w.title AS name,
+            w.status,
+            w.created_at,
+            d.db_host,
+            d.db_user,
+            d.db_password,
+            d.db_service,
+            d.db_name
+          FROM workspace w
+          LEFT JOIN dbinfos d ON w.db_id = d.db_name AND w.user_id = d.user_id
+          WHERE w.user_id = ?
+          ORDER BY w.created_at DESC;`,
+          [user_id]
+        );
       workspaces = result;
     }
 
     //  If no workspaces exist, return empty array
     if (!workspaces || workspaces.length === 0) {
-      return res.status(200).json({ messages: "No workspaces found. Please add a workspace." });
+      return res.status(200).json([]);
     }
 
+    // Format workspace response with database config
+    const formattedWorkspaces = workspaces.map(ws => ({
+      id: ws.workspace_id,
+      name: ws.name || "Unnamed Workspace",
+      workspace_id: ws.workspace_id,
+      user_id: ws.user_id,
+      db_id: ws.db_id,
+      status: ws.status,
+      dbConfig: ws.db_host ? {
+        host: ws.db_host,
+        user: ws.db_user,
+        password: ws.db_password,
+        service: ws.db_service,
+        database: ws.db_name,
+      } : null
+    }));
+
     // Return all workspaces
-    return res.status(200).json(workspaces);
+    return res.status(200).json(formattedWorkspaces);
   } catch (error) {
     console.error("Get Workspace Error:", error);
     return res.status(500).send("Internal server error");
@@ -160,15 +311,16 @@ async function handleConnectWorkspaces(req, res) {
 
     if (process.env.LOCAL_DB_TYPE === "postgres") {
       const result = await pg_db.query(
-        "SELECT * FROM dbinfos WHERE db_workspace = $1;",
-        [workspace.workspace_id]
+        "SELECT * FROM dbinfos WHERE db_name = $1 AND user_id = $2;",
+        [db_name, user_id]
       );
       dbInfo = result.rows[0] || null;
     } else {
       const [result] = await mysql_db
         .promise()
-        .query("SELECT * FROM dbinfos WHERE db_workspace = ?;", [
-          workspace.workspace_id,
+        .query("SELECT * FROM dbinfos WHERE db_name = ? AND user_id = ?;", [
+          db_name,
+          user_id,
         ]);
       dbInfo = result && result[0] ? result[0] : null;
     }
@@ -188,11 +340,14 @@ async function handleConnectWorkspaces(req, res) {
       db_name: workspaceDBName,
     } = dbInfo;
 
+    // Normalize db_service: accept both "postgres" and "postgresql"
+    const isPostgres = db_service === "postgres" || db_service === "postgresql";
+
     let connection;
     let connectStatus = false;
 
     //Autoconnect db
-    if (db_service === "postgres") {
+    if (isPostgres) {
       connection = new PGClient({
         host: db_host,
         user: db_user,
@@ -225,12 +380,100 @@ async function handleConnectWorkspaces(req, res) {
       database: workspaceDBName,
       password: db_password,
     };
-    const schema = await extractSchema(db_service, config);
-    await schemaUpload(db_service, config, schema);
+    
+    console.log(`\n📊 Extracting Schema from database:`);
+    console.log(`   Host: ${db_host}`);
+    console.log(`   Database: ${workspaceDBName}`);
+    console.log(`   User: ${db_user}`);
+    console.log(`   Service: ${db_service}\n`);
+    
+    // Extract schema from the database (non-blocking if fails)
+    try {
+      const schema = await extractSchema(db_service, config);
+      if (schema && Object.keys(schema).length > 0) {
+        console.log(`✅ Found ${Object.keys(schema).length} tables in database:`);
+        Object.keys(schema).forEach(table => {
+          console.log(`   - ${table}`);
+        });
+        await schemaUpload(db_service, config, schema);
+        console.log(`✅ Schema extracted and uploaded`);
+      } else {
+        console.log(`⚠️ No tables found in database "${workspaceDBName}"`);
+        console.log(`   If this is unexpected, check that:`);
+        console.log(`   1. You're connecting to the correct database`);
+        console.log(`   2. The database has tables created`);
+        console.log(`   3. The tables are in the 'public' schema`);
+      }
+    } catch (schemaErr) {
+      console.warn(`⚠️ Schema extraction failed (non-blocking):`, schemaErr.message);
+      // Continue without schema - not critical
+    }
 
-    // Fetch conversation history (all messages for this workspace)
-    const conversationResult = await getConversationHistory(workspace.workspace_id);
-    const messages = conversationResult.success ? conversationResult.messages : [];
+    // Fetch conversation history (non-blocking if fails)
+    let messages = [];
+    try {
+      const conversationResult = await getConversationHistory(workspace.workspace_id);
+      messages = conversationResult.success ? conversationResult.messages : [];
+    } catch (historyErr) {
+      console.warn(`⚠️ Failed to fetch conversation history (non-blocking):`, historyErr.message);
+      // Continue without history
+    }
+
+    // Request container creation from cloud-backend
+    console.log(`[Container] Requesting container for user ${user_id}...`);
+    let containerInfo = null;
+    const containerResult = await createContainerOnCloudBackend(user_id);
+    
+    if (containerResult.success) {
+      if (containerResult.container_id && containerResult.container_id !== "unknown" && containerResult.container_id !== null) {
+        // Container was successfully created on cloud-backend
+        console.log(`✅ Container created on cloud-backend for user: ${user_id}`);
+        console.log(`   Container ID: ${containerResult.container_id}`);
+        console.log(`   Container URL: ${containerResult.container_url}`);
+        
+        // Try to store container info in local database
+        if (containerResult.container_url) {
+          const storeResult = await createUserContainer(
+            user_id,
+            containerResult.container_id,
+            containerResult.container_url,  // Use URL as host
+            9000,  // Default port
+            containerResult.container_url   // WS URL
+          );
+          
+          if (storeResult.success) {
+            containerInfo = {
+              container_id: containerResult.container_id,
+              container_name: containerResult.container_name,
+              container_url: containerResult.container_url,
+              is_new: containerResult.is_new,
+              token: containerResult.token,
+            };
+            console.log(`✅ Container info stored locally for user: ${user_id}`);
+          } else {
+            console.warn(`⚠️ Container created but not stored locally: ${storeResult.error}`);
+          }
+        }
+      } else {
+        // Token generated but container not created (Kubernetes unavailable)
+        console.log(`✅ Authentication token generated for user: ${user_id}`);
+        console.log(`⚠️ Container service unavailable on cloud-backend`);
+        if (containerResult.warning) {
+          console.log(`   Reason: ${containerResult.warning}`);
+        }
+        console.log(`   Workspace will still function without containerized LLM access`);
+        
+        // Store token for future use even without container
+        containerInfo = {
+          auth_token: containerResult.token,
+          container_available: false,
+          message: containerResult.warning || "Container service unavailable",
+        };
+      }
+    } else {
+      console.warn(`⚠️ Container request failed: ${containerResult.error}`);
+      // Continue without container - workspace still functions
+    }
 
     return res.status(200).json({
       message: "Connection successful",
@@ -242,6 +485,7 @@ async function handleConnectWorkspaces(req, res) {
         user: db_user,
         db_name: workspaceDBName,
       },
+      container_info: containerInfo,
       conversation_history: messages,
       message_count: messages.length,
     });
@@ -255,8 +499,28 @@ async function handleConnectWorkspaces(req, res) {
 }
 
 async function handleWorkspaceQuery(req, res) {
-  const { db_name, nl_query } = req.body;
+  // Backend expects: db_name, nl_query
+  // Frontend sends: workspaceId, query, dbConfig
+  // This function needs to handle the frontend format
+  let { db_name, nl_query, workspaceId, query, dbConfig } = req.body;
+
+  // If frontend format is used, map it to backend format
+  if (!db_name && query) {
+    nl_query = query;
+  }
+  if (!db_name && dbConfig?.database) {
+    db_name = dbConfig.database;
+  }
+
   try {
+    if (!db_name || !nl_query) {
+      return res.status(400).json({
+        message: "Missing required parameters",
+        error: "Database name (db_name) and natural language query (nl_query) are required",
+        received: { db_name, nl_query, workspaceId, query }
+      });
+    }
+
     const response = await fetchQuery(db_name, nl_query);
     if (!response.success) {
       console.error("SQL Query Fetch Error:", response.error);

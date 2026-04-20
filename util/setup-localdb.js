@@ -67,16 +67,20 @@ async function setupLocalDB(dbType) {
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );`);
 
+    await pg_db.query(`CREATE INDEX IF NOT EXISTS idx_workspace_user_id ON workspace(user_id);`);
+
     await pg_db.query(`
         CREATE TABLE IF NOT EXISTS dbinfos (
           id SERIAL PRIMARY KEY,
-          user_id TEXT REFERENCES userinfos(user_id) ON DELETE CASCADE ON UPDATE CASCADE,
-          db_workspace UUID UNIQUE NOT NULL REFERENCES workspace(workspace_id) ON DELETE CASCADE,
+          user_id TEXT NOT NULL REFERENCES userinfos(user_id) ON DELETE CASCADE,
+          db_workspace TEXT NOT NULL,
           db_service TEXT NOT NULL,
           db_host TEXT NOT NULL,
           db_user TEXT NOT NULL,
           db_password TEXT NOT NULL,
-          db_name TEXT NOT NULL
+          db_name TEXT NOT NULL,
+          "createdAt" TIMESTAMP DEFAULT NOW(),
+          "updatedAt" TIMESTAMP DEFAULT NOW()
         );
     `);
 

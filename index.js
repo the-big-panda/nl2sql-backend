@@ -37,6 +37,23 @@ app.use(cors(corsOptions));
     const db = await setupLocalDB(dbType);
     app.set("db", db); // Store in app context for routes to use
 
+    // Health check endpoints (no auth required)
+    app.get('/health', (req, res) => {
+      res.json({ status: 'healthy', service: 'be-project', database: dbType });
+    });
+
+    app.get('/', (req, res) => {
+      res.json({ 
+        message: 'BE-Project Backend is running', 
+        database: dbType,
+        endpoints: {
+          health: '/health',
+          auth: '/user/register, /user/login',
+          workspace: '/workspace/getWorkspaces, /workspace/addWorkspaces'
+        }
+      });
+    });
+
     // Register routes AFTER database is ready
     const userRoutes = require('./route/userRoutes');
     const workspaceRoutes = require('./route/workspaceRoute');

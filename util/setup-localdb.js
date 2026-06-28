@@ -2,6 +2,7 @@
 const os = require("os");
 const { Client } = require("pg");
 const mysql = require("mysql2/promise");
+require("dotenv").config();
 
 /**
  * Initialize the `local_setup_db` database and ensure required tables exist.
@@ -13,16 +14,16 @@ async function setupLocalDB(dbType) {
     return null;
   }
 
-  const localDBName = "local_setup_db";
+  const localDBName = process.env.PG_DATABASE_NAME || process.env.MYSQL_DATABASE_NAME || "local_setup_db";
 
   if (dbType === "postgres") {
     // Connect to admin DB to create database if needed
     const admin = new Client({
-      user: "postgres",
-      host: "localhost",
+      user: process.env.PG_DATABASE_USER || "postgres",
+      host: process.env.PG_DATABASE_HOST || "localhost",
       database: "postgres",
-      password: "",
-      port: 5432,
+      password: process.env.PG_DATABASE_PASSWORD || "",
+      port: Number(process.env.PG_DATABASE_PORT || 5432),
     });
     await admin.connect();
     try {
@@ -103,6 +104,22 @@ async function setupLocalDB(dbType) {
         UNIQUE(workspace_id, sequence_number)
 );`)
 
+    await pg_db.query(`
+      CREATE TABLE IF NOT EXISTS containers (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT UNIQUE NOT NULL REFERENCES userinfos(user_id) ON DELETE CASCADE,
+        container_id TEXT NOT NULL UNIQUE,
+        container_host TEXT NOT NULL,
+        container_port INTEGER NOT NULL,
+        container_ws_url TEXT NOT NULL,
+        status TEXT DEFAULT 'active',
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+
+    await pg_db.query(`CREATE INDEX IF NOT EXISTS idx_containers_user_id ON containers(user_id);`);
+
     // Seed initial user if empty
     const countRes = await pg_db.query("SELECT COUNT(*) FROM userinfos;");
     const count = parseInt(countRes.rows[0].count, 10);
@@ -127,9 +144,9 @@ async function setupLocalDB(dbType) {
   if (dbType === "mysql") {
     // Connect to server without database to create the DB if needed
     const admin = await mysql.createConnection({
-      host: "localhost",
-      user: "root",
-      password: "424354",
+      host: process.env.MYSQL_DATABASE_HOST || "localhost",
+      user: process.env.MYSQL_DATABASE_USER || "root",
+      password: process.env.MYSQL_DATABASE_PASSWORD || "root",
       multipleStatements: true,
     });
     try {
@@ -145,11 +162,11 @@ async function setupLocalDB(dbType) {
     const mysqlModule = require("../database/mysqlConfig");
 
     const conn = await mysqlModule.createConnection({
-      host: "localhost",
-      user: "root",
-      password: "424354",
+      host: process.env.MYSQL_DATABASE_HOST || "localhost",
+      user: process.env.MYSQL_DATABASE_USER || "root",
+      password: process.env.MYSQL_DATABASE_PASSWORD || "root",
       database: localDBName,
-      port: 3306,
+      port: Number(process.env.MYSQL_DATABASE_PORT || 3306),
     });
 
     // Ensure tables exist (use the promise API)
@@ -204,6 +221,22 @@ async function setupLocalDB(dbType) {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE KEY unique_sequence_per_workspace (workspace_id, sequence_number),
         FOREIGN KEY (workspace_id) REFERENCES workspace(workspace_id) ON DELETE CASCADE
+      );
+    `);
+
+    await conn.promise().query(`
+      CREATE TABLE IF NOT EXISTS containers (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id VARCHAR(255) NOT NULL UNIQUE,
+        container_id VARCHAR(255) NOT NULL UNIQUE,
+        container_host TEXT NOT NULL,
+        container_port INT NOT NULL,
+        container_ws_url TEXT NOT NULL,
+        status VARCHAR(50) DEFAULT 'active',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES userinfos(user_id) ON DELETE CASCADE,
+        INDEX idx_containers_user_id (user_id)
       );
     `);
 

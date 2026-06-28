@@ -13,7 +13,18 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // CORS configuration from environment
-const corsOrigins = (process.env.CORS_ORIGIN || 'http://localhost:8000').split(',');
+const defaultCorsOrigins = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:8000',
+  'http://127.0.0.1:8000',
+  'http://localhost:8080',
+  'http://127.0.0.1:8080',
+];
+const corsOrigins = (process.env.CORS_ORIGIN || defaultCorsOrigins.join(','))
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 var corsOptions = {
   origin: corsOrigins,
 }

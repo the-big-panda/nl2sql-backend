@@ -1,11 +1,12 @@
 const { Client } = require("pg");
+require("dotenv").config();
 
 const pg_db = new Client({
-  user: "postgres",
-  host: "localhost",
-  database: "local_setup_db",
-  password: "", // or your password
-  port: 5432,
+  user: process.env.PG_DATABASE_USER || "postgres",
+  host: process.env.PG_DATABASE_HOST || "localhost",
+  database: process.env.PG_DATABASE_NAME || "local_setup_db",
+  password: process.env.PG_DATABASE_PASSWORD || "",
+  port: Number(process.env.PG_DATABASE_PORT || 5432),
   ssl: false, // ✅ disable SSL for local
 });
 

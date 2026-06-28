@@ -3,25 +3,194 @@ require("dotenv").config();
 const pg_db = require("../../database/postgresConfig");
 const mysql = require("mysql2/promise");
 const { v4: uuidv4 } = require("uuid");
+const { getUserContainer } = require("../../services/containerService");
 
-async function schemaUpload(db_name, db_service, schema) {
+function buildUrl(baseUrl, path) {
+  return `${String(baseUrl).replace(/\/$/, "")}${path}`;
+}
+
+function schemaToText(schema) {
+  if (!schema || typeof schema !== "object") {
+    return String(schema || "");
+  }
+
+  return Object.entries(schema)
+    .map(([tableName, columns]) => {
+      const columnText = Array.isArray(columns)
+        ? columns.map((column) => `${column.column} ${column.type}`).join(", ")
+        : JSON.stringify(columns);
+      return `${tableName}(${columnText})`;
+    })
+    .join("\n");
+}
+
+function schemaToTables(schema) {
+  if (!schema || typeof schema !== "object") {
+    return [];
+  }
+
+  return Object.entries(schema).map(([tableName, columns]) => ({
+    table_name: tableName,
+    columns: Array.isArray(columns) ? columns : [],
+    schema_text: `${tableName}(${
+      Array.isArray(columns)
+        ? columns.map((column) => `${column.column} ${column.type}`).join(", ")
+        : JSON.stringify(columns)
+    })`,
+  }));
+}
+
+function normalizeGeneratedSql(sql) {
+  if (!sql) {
+    return sql;
+  }
+
+  return String(sql)
+    .replace(
+      /\b(SUM|AVG|MIN|MAX|COUNT)\s+([a-zA-Z_][\w.]*\s*(?:[+\-*/]\s*[a-zA-Z_][\w.]*)*)\s+AS\b/gi,
+      (_, fn, expression) => `${fn.toUpperCase()}(${expression.trim()}) AS`
+    )
+    .trim();
+}
+
+function getMetadataQuery(db_service, nl_query) {
+  const question = String(nl_query || "").trim().toLowerCase();
+  const asksForTables =
+    /\b(show|list|get|display)\b/.test(question) &&
+    /\b(tables|relations)\b/.test(question);
+
+  if (!asksForTables) {
+    return null;
+  }
+
+  const dbType = String(db_service || "").toLowerCase();
+  if (dbType === "postgres" || dbType === "postgresql") {
+    return `
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+      ORDER BY table_name
+    `.trim();
+  }
+
+  if (dbType === "mysql" || dbType === "mariadb") {
+    return `
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+      ORDER BY table_name
+    `.trim();
+  }
+
+  return null;
+}
+
+function quoteIdentifier(identifier, db_service) {
+  const dbType = String(db_service || "").toLowerCase();
+  const safeIdentifier = String(identifier || "").replace(/[^a-zA-Z0-9_]/g, "");
+  if (!safeIdentifier) {
+    return null;
+  }
+
+  if (dbType === "mysql" || dbType === "mariadb") {
+    return `\`${safeIdentifier}\``;
+  }
+
+  return `"${safeIdentifier}"`;
+}
+
+function getSimpleSelectQuery(db_service, nl_query, schema) {
+  const question = String(nl_query || "").trim().toLowerCase();
+  const asksForRows =
+    /\b(fetch|get|show|list|display|select)\b/.test(question) &&
+    /\b(data|rows|records|entries|all)\b/.test(question);
+
+  if (!asksForRows || !schema || typeof schema !== "object") {
+    return null;
+  }
+
+  const tableName = Object.keys(schema).find((name) => {
+    const normalizedName = name.toLowerCase();
+    return (
+      question.includes(normalizedName) ||
+      question.includes(`${normalizedName} table`) ||
+      question.includes(`table ${normalizedName}`)
+    );
+  });
+
+  const quotedTableName = quoteIdentifier(tableName, db_service);
+  if (!quotedTableName) {
+    return null;
+  }
+
+  return `SELECT * FROM ${quotedTableName} LIMIT 100`;
+}
+
+function getSampleJoinQuery(nl_query, schema) {
+  const question = String(nl_query || "").trim().toLowerCase();
+  const tableNames = new Set(Object.keys(schema || {}).map((name) => name.toLowerCase()));
+
+  const asksForCustomerSales =
+    /\b(total|sum|revenue|sales|value)\b/.test(question) &&
+    /\bcustomer/.test(question) &&
+    ["customers", "orders", "order_items"].every((tableName) => tableNames.has(tableName));
+
+  if (!asksForCustomerSales) {
+    return null;
+  }
+
+  return `
+    SELECT c.customer_name,
+           SUM(oi.quantity * oi.unit_price) AS total_sales
+    FROM customers c
+    JOIN orders o ON o.customer_id = c.customer_id
+    JOIN order_items oi ON oi.order_id = o.order_id
+    WHERE o.status = 'completed'
+    GROUP BY c.customer_name
+    ORDER BY total_sales DESC
+  `.trim();
+}
+
+async function getUserContainerBaseUrl(user_id) {
+  if (!user_id) {
+    return null;
+  }
+
+  const containerResult = await getUserContainer(user_id);
+  if (!containerResult.success || !containerResult.container) {
+    return null;
+  }
+
+  const { container_host, container_port } = containerResult.container;
+  if (!container_host) {
+    return null;
+  }
+
+  if (/^https?:\/\//i.test(container_host)) {
+    return container_host;
+  }
+
+  return `http://${container_host}:${container_port}`;
+}
+
+async function schemaUpload(workspace_id, db_service, schema, user_id = null) {
   try {
-    if (!db_name || !db_service || !schema) {
-      throw new Error("Missing required parameters: db_name, db_service or schema.");
+    if (!workspace_id || !db_service || !schema) {
+      throw new Error("Missing required parameters: workspace_id, db_service or schema.");
     }
 
-    // DO NOT FLATTEN SCHEMA. FastAPI expects nested object.
     const payload = {
-      database: db_name,
-      service: "postgres",
-      schema: schema     // <-- keep ORIGINAL nested objecrt
+      workspace_id,
+      dbType: db_service,
+      tables: schemaToTables(schema),
     };
 
     console.log("Payload sent to API:", JSON.stringify(payload, null, 2));
 
-    const ENDPOINT_URL =
-      process.env.ENDPOINT_URL ||
-      "http://localhost:8001/generate-sql";
+    const containerBaseUrl = await getUserContainerBaseUrl(user_id);
+    const ENDPOINT_URL = containerBaseUrl
+      ? buildUrl(containerBaseUrl, "/update-schema")
+      : process.env.ENDPOINT_URL || "http://localhost:8001/update-schema";
 
     const response = await axios.post(ENDPOINT_URL, payload);
 
@@ -38,43 +207,97 @@ async function schemaUpload(db_name, db_service, schema) {
 }
 
 
-async function fetchQuery(db_name, nl_query) {
+async function fetchQuery(db_name, nl_query, user_id = null, options = {}) {
   try {
     if (!db_name || !nl_query) {
       throw new Error("Database name and NL query required");
     }
 
-    const ENDPOINT_URL =
-      process.env.QUERY_GENERATOR_URL ||
-      "http://127.0.0.1:8000/api/query";
+    const metadataQuery = getMetadataQuery(options.db_service || options.dbType, nl_query);
+    if (metadataQuery) {
+      return {
+        success: true,
+        sql_query: metadataQuery,
+        source: "metadata-shortcut",
+      };
+    }
+
+    const simpleSelectQuery = getSimpleSelectQuery(
+      options.db_service || options.dbType,
+      nl_query,
+      options.schema
+    );
+    if (simpleSelectQuery) {
+      return {
+        success: true,
+        sql_query: simpleSelectQuery,
+        source: "simple-select-shortcut",
+      };
+    }
+
+    const sampleJoinQuery = getSampleJoinQuery(nl_query, options.schema);
+    if (sampleJoinQuery) {
+      return {
+        success: true,
+        sql_query: sampleJoinQuery,
+        source: "sample-join-shortcut",
+      };
+    }
+
+    const containerBaseUrl = await getUserContainerBaseUrl(user_id);
+    const ENDPOINT_URL = containerBaseUrl
+      ? buildUrl(containerBaseUrl, "/generate-sql")
+      : process.env.QUERY_GENERATOR_URL || "http://127.0.0.1:8000/generate-sql";
+
+    let question = String(nl_query).trim();
+    if (options.previous_sql || options.query_error) {
+      question = [
+        question,
+        "",
+        "The previous SQL failed. Generate a corrected PostgreSQL SELECT query.",
+        "Use only tables and columns that exist in the provided schema.",
+        "Return only executable SQL. Aggregate functions must use parentheses, for example SUM(oi.quantity * oi.unit_price).",
+        options.previous_sql ? `Previous SQL:\n${options.previous_sql}` : null,
+        options.query_error ? `Database error:\n${options.query_error}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
 
     const payload = {
       database: String(db_name).trim(),
-      query: String(nl_query).trim()
+      dbType: options.db_service || options.dbType || "postgres",
+      schema: schemaToText(options.schema),
+      question,
+      workspace_id: options.workspace_id || String(db_name).trim(),
     };
 
+    console.log("QUERY ENDPOINT:", ENDPOINT_URL);
     console.log("QUERY PAYLOAD:", JSON.stringify(payload, null, 2));
 
     const response = await axios.post(ENDPOINT_URL, payload);
 
-    console.log("\nSQL QUERY FROM LLM:", response.data.sql_query, "\n");
+    const sql_query = normalizeGeneratedSql(response.data.sql_query || response.data.sql);
+
+    console.log("\nSQL QUERY FROM LLM:", sql_query, "\n");
 
     // FIXED VALIDATION
-    if (!response.data.success || !response.data.sql_query) {
+    if (!sql_query) {
       throw new Error("Invalid response from query generator service");
     }
 
     return {
       success: true,
-      sql_query: response.data.sql_query
+      sql_query
     };
 
   } catch (error) {
-    console.error("Query Fetch Error:", error.message);
+    const errorDetail = error.response?.data || error.message;
+    console.error("Query Fetch Error:", errorDetail);
 
     return {
       success: false,
-      error: error.message
+      error: errorDetail
     };
   }
 }

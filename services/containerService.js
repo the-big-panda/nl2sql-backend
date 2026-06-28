@@ -1,5 +1,20 @@
 const pg_db = require("../database/postgresConfig");
 const mysql = require("mysql2/promise");
+require("dotenv").config();
+
+function getLocalDbName() {
+  return process.env.MYSQL_DATABASE_NAME || process.env.PG_DATABASE_NAME || "local_setup_db";
+}
+
+async function createMysqlConnection() {
+  return mysql.createConnection({
+    host: process.env.MYSQL_DATABASE_HOST || "localhost",
+    user: process.env.MYSQL_DATABASE_USER || "root",
+    password: process.env.MYSQL_DATABASE_PASSWORD || "root",
+    database: getLocalDbName(),
+    port: Number(process.env.MYSQL_DATABASE_PORT || 3306),
+  });
+}
 
 /**
  * Fetch user's container information from database
@@ -23,11 +38,13 @@ async function getUserContainer(user_id) {
       }
       return { success: true, container: result.rows[0] };
     } else {
-      const [result] = await mysql.promise().query(
-        `SELECT container_id, container_host, container_port, container_ws_url, status 
+      const conn = await createMysqlConnection();
+      const [result] = await conn.query(
+        `SELECT container_id, container_host, container_port, container_ws_url, status
          FROM containers WHERE user_id = ?;`,
         [user_id]
       );
+      await conn.end();
       if (!result || result.length === 0) {
         throw new Error("No container found for this user");
       }
@@ -56,16 +73,32 @@ async function createUserContainer(user_id, container_id, container_host, contai
 
     if (process.env.LOCAL_DB_TYPE === "postgres") {
       await pg_db.query(
-        `INSERT INTO containers (user_id, container_id, container_host, container_port, container_ws_url, status, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW());`,
+        `INSERT INTO containers (user_id, container_id, container_host, container_port, container_ws_url, status, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+         ON CONFLICT (user_id) DO UPDATE SET
+          container_id = EXCLUDED.container_id,
+          container_host = EXCLUDED.container_host,
+          container_port = EXCLUDED.container_port,
+          container_ws_url = EXCLUDED.container_ws_url,
+          status = EXCLUDED.status,
+          updated_at = NOW();`,
         [user_id, container_id, container_host, container_port, container_ws_url, "active"]
       );
     } else {
-      await mysql.promise().query(
+      const conn = await createMysqlConnection();
+      await conn.query(
         `INSERT INTO containers (user_id, container_id, container_host, container_port, container_ws_url, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, NOW());`,
+         VALUES (?, ?, ?, ?, ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE
+          container_id = VALUES(container_id),
+          container_host = VALUES(container_host),
+          container_port = VALUES(container_port),
+          container_ws_url = VALUES(container_ws_url),
+          status = VALUES(status),
+          updated_at = NOW();`,
         [user_id, container_id, container_host, container_port, container_ws_url, "active"]
       );
+      await conn.end();
     }
 
     console.log(`✅ Container created for user: ${user_id}`);
@@ -94,10 +127,12 @@ async function updateContainerStatus(user_id, status) {
         [status, user_id]
       );
     } else {
-      await mysql.promise().query(
+      const conn = await createMysqlConnection();
+      await conn.query(
         `UPDATE containers SET status = ?, updated_at = NOW() WHERE user_id = ?;`,
         [status, user_id]
       );
+      await conn.end();
     }
 
     return { success: true, message: `Container status updated to ${status}` };

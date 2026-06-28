@@ -1,5 +1,4 @@
 const jwt = require("jsonwebtoken");
-const { model } = require("mongoose");
 require('dotenv').config();
 
 // Normalize field names for compatibility

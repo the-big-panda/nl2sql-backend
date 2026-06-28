@@ -57,6 +57,8 @@ async function createContainerOnCloudBackend(user_id, email = null) {
         container_id: data.container.id,
         container_name: data.container.name,
         container_url: data.container.url,
+        container_port: data.container.port || null,
+        container_ws_url: data.container.wsUrl || null,
         is_new: data.container.isNew,
       });
       

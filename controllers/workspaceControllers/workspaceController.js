@@ -3,7 +3,7 @@ const { Client: PGClient } = require("pg");
 const mysql = require("mysql2/promise");
 const mysql_db = require("../../database/mysqlConfig");
 const extractSchema = require("../dbControllers/schemaExtractor");
-const { fetchQuery, schemaUpload, getConversationHistory } = require("../llmControllers/llmConfig");
+const { fetchQuery, schemaUpload, getConversationHistory, saveMessage } = require("../llmControllers/llmConfig");
 const  handleQueryExecution  = require("../llmControllers/queryController");
 const { createContainerOnCloudBackend } = require("../../util/cloudBackendClient");
 const { createUserContainer } = require("../../services/containerService");
@@ -126,9 +126,9 @@ async function handleAddWorkSpaces(req, res) {
           const storeResult = await createUserContainer(
             user_id,
             containerResult.container_id,
-            containerResult.container_url,  // Use URL as host
-            9000,  // Default port
-            containerResult.container_url   // WS URL
+            containerResult.container_url,
+            containerResult.container_port || 9001,
+            containerResult.container_ws_url || containerResult.container_url
           );
           
           if (storeResult.success) {
@@ -136,6 +136,7 @@ async function handleAddWorkSpaces(req, res) {
               container_id: containerResult.container_id,
               container_name: containerResult.container_name,
               container_url: containerResult.container_url,
+              container_port: containerResult.container_port,
               is_new: containerResult.is_new,
               token: containerResult.token,
             };
@@ -395,7 +396,7 @@ async function handleConnectWorkspaces(req, res) {
         Object.keys(schema).forEach(table => {
           console.log(`   - ${table}`);
         });
-        await schemaUpload(db_service, config, schema);
+        await schemaUpload(workspace.workspace_id, db_service, schema, user_id);
         console.log(`✅ Schema extracted and uploaded`);
       } else {
         console.log(`⚠️ No tables found in database "${workspaceDBName}"`);
@@ -436,9 +437,9 @@ async function handleConnectWorkspaces(req, res) {
           const storeResult = await createUserContainer(
             user_id,
             containerResult.container_id,
-            containerResult.container_url,  // Use URL as host
-            9000,  // Default port
-            containerResult.container_url   // WS URL
+            containerResult.container_url,
+            containerResult.container_port || 9001,
+            containerResult.container_ws_url || containerResult.container_url
           );
           
           if (storeResult.success) {
@@ -446,6 +447,7 @@ async function handleConnectWorkspaces(req, res) {
               container_id: containerResult.container_id,
               container_name: containerResult.container_name,
               container_url: containerResult.container_url,
+              container_port: containerResult.container_port,
               is_new: containerResult.is_new,
               token: containerResult.token,
             };
@@ -521,7 +523,78 @@ async function handleWorkspaceQuery(req, res) {
       });
     }
 
-    const response = await fetchQuery(db_name, nl_query);
+    const user_id = req.user.userID;
+
+    let dbInfo = null;
+    let workspace = null;
+    if (process.env.LOCAL_DB_TYPE === "postgres") {
+      const result = await pg_db.query(
+        "SELECT * FROM dbinfos WHERE db_name = $1 AND user_id = $2;",
+        [db_name, user_id]
+      );
+      dbInfo = result.rows[0] || null;
+
+      const workspaceResult = await pg_db.query(
+        "SELECT * FROM workspace WHERE user_id = $1 AND db_id = $2;",
+        [user_id, db_name]
+      );
+      workspace = workspaceResult.rows[0] || null;
+    } else {
+      const [result] = await mysql_db
+        .promise()
+        .query("SELECT * FROM dbinfos WHERE db_name = ? AND user_id = ?;", [
+          db_name,
+          user_id,
+        ]);
+      dbInfo = result && result[0] ? result[0] : null;
+
+      const [workspaceResult] = await mysql_db
+        .promise()
+        .query("SELECT * FROM workspace WHERE user_id = ? AND db_id = ?;", [
+          user_id,
+          db_name,
+        ]);
+      workspace = workspaceResult && workspaceResult[0] ? workspaceResult[0] : null;
+    }
+
+    if (!dbInfo) {
+      return res.status(404).json({
+        message: "Database connection details not found for this workspace.",
+      });
+    }
+
+    const schemaConfig = {
+      host: dbInfo.db_host,
+      user: dbInfo.db_user,
+      database: dbInfo.db_name,
+      password: dbInfo.db_password,
+    };
+
+    let schema = null;
+    try {
+      schema = await extractSchema(dbInfo.db_service, schemaConfig);
+    } catch (schemaError) {
+      console.error("Schema extraction failed:", schemaError.message);
+      return res.status(400).json({
+        message: "Failed to connect to the workspace database",
+        error: schemaError.message,
+        hint: `Check the saved ${dbInfo.db_service} credentials for "${dbInfo.db_name}".`,
+        connection_info: {
+          service: dbInfo.db_service,
+          host: dbInfo.db_host,
+          user: dbInfo.db_user,
+          database: dbInfo.db_name,
+        },
+      });
+    }
+
+    const resolvedWorkspaceId = workspaceId || workspace?.workspace_id || db_name;
+
+    const response = await fetchQuery(db_name, nl_query, user_id, {
+      db_service: dbInfo.db_service,
+      schema,
+      workspace_id: resolvedWorkspaceId,
+    });
     if (!response.success) {
       console.error("SQL Query Fetch Error:", response.error);
 
@@ -531,30 +604,72 @@ async function handleWorkspaceQuery(req, res) {
       });
     }
 
-    const user_id = req.user.userID;
-
-    const results = await handleQueryExecution(
+    let sqlQuery = response.sql_query;
+    let execution = await handleQueryExecution(
       db_name,
       user_id,
-      response.sql_query
+      sqlQuery
     );
 
-    if (!results.success) {
-      console.error("SQL Query Execution Error:", results.error);
+    if (!execution.success) {
+      console.warn("SQL Query Execution Error, requesting one correction:", execution.error);
+
+      const retryResponse = await fetchQuery(db_name, nl_query, user_id, {
+        db_service: dbInfo.db_service,
+        schema,
+        workspace_id: resolvedWorkspaceId,
+        previous_sql: sqlQuery,
+        query_error: execution.error,
+      });
+
+      if (retryResponse.success && retryResponse.sql_query && retryResponse.sql_query !== sqlQuery) {
+        sqlQuery = retryResponse.sql_query;
+        execution = await handleQueryExecution(db_name, user_id, sqlQuery);
+      }
+    }
+
+    if (!execution.success) {
+      console.error("SQL Query Execution Error:", execution.error);
       return res.status(400).json({
         message: "Failed to execute sql query",
-        error: results.error,
+        error: execution.error,
+        sql_query: sqlQuery,
       });
     }
 
+    if (workspace?.workspace_id) {
+      try {
+        await saveMessage(workspace.workspace_id, "user", nl_query);
+        await saveMessage(
+          workspace.workspace_id,
+          "assistant",
+          sqlQuery,
+          sqlQuery,
+          {
+            db_service: execution.db_service,
+            db_name: execution.db_name,
+            row_count: execution.rows?.length || 0,
+            fields: execution.fields || [],
+          }
+        );
+      } catch (messageError) {
+        console.warn("Message save failed (non-blocking):", messageError.message);
+      }
+    }
+
     return res.status(200).json({
-      result: results,
-      sql_query: response.sql_query,
+      success: true,
+      sql_query: sqlQuery,
+      result: execution,
+      results: execution.rows || [],
+      rows: execution.rows || [],
+      fields: execution.fields || [],
+      row_count: execution.rows?.length || 0,
     });
   } catch (error) {
-    console.error("Connect Workspace Error:", error);
+    console.error("Workspace Query Error:", error);
     return res.status(500).json({
-      message: "Failed to connect to workspace",
+      message: "Failed to process workspace query",
       error: error.message,
     });
   }

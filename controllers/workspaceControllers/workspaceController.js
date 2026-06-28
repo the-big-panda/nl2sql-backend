@@ -274,10 +274,21 @@ async function handleGetWorkspaces(req, res) {
 }
 
 async function handleConnectWorkspaces(req, res) {
-  const { db_name } = req.body;
+  const {
+    db_name,
+    workspaceId,
+    db_host,
+    db_user,
+    db_password,
+    db_service,
+  } = req.body;
+  const requestedDbName = db_name || req.body.database;
+  const hasConnectionConfig =
+    Boolean(db_host && db_user && db_service && requestedDbName) &&
+    typeof db_password !== "undefined";
 
   try {
-    if (!db_name) {
+    if (!requestedDbName && !workspaceId) {
       return res.status(404).send("DB Name is required.");
     }
     const user_id = req.user.userID;
@@ -286,18 +297,30 @@ async function handleConnectWorkspaces(req, res) {
     let workspace = null;
 
     if (process.env.LOCAL_DB_TYPE === "postgres") {
-      const result = await pg_db.query(
-        "SELECT * FROM workspace WHERE user_id = $1 AND db_id = $2;",
-        [user_id, db_name]
-      );
+      const result = workspaceId
+        ? await pg_db.query(
+            "SELECT * FROM workspace WHERE user_id = $1 AND workspace_id = $2;",
+            [user_id, workspaceId]
+          )
+        : await pg_db.query(
+            "SELECT * FROM workspace WHERE user_id = $1 AND db_id = $2;",
+            [user_id, requestedDbName]
+          );
       workspace = result.rows[0] || null;
     } else {
-      const [result] = await mysql_db
-        .promise()
-        .query("SELECT * FROM workspace WHERE user_id = ? AND db_id = ?;", [
-          user_id,
-          db_name,
-        ]);
+      const [result] = workspaceId
+        ? await mysql_db
+            .promise()
+            .query("SELECT * FROM workspace WHERE user_id = ? AND workspace_id = ?;", [
+              user_id,
+              workspaceId,
+            ])
+        : await mysql_db
+            .promise()
+            .query("SELECT * FROM workspace WHERE user_id = ? AND db_id = ?;", [
+              user_id,
+              requestedDbName,
+            ]);
       workspace = result && result[0] ? result[0] : null;
     }
 
@@ -307,20 +330,85 @@ async function handleConnectWorkspaces(req, res) {
       });
     }
 
+    if (hasConnectionConfig) {
+      const normalizedService = db_service === "postgres" ? "postgresql" : db_service;
+
+      if (process.env.LOCAL_DB_TYPE === "postgres") {
+        await pg_db.query(
+          "DELETE FROM dbinfos WHERE user_id = $1 AND db_name = $2;",
+          [user_id, requestedDbName]
+        );
+
+        await pg_db.query(
+          `INSERT INTO dbinfos
+            (user_id, db_workspace, db_host, db_service, db_user, db_password, db_name, "createdAt", "updatedAt")
+           VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW());`,
+          [
+            user_id,
+            workspace.title || workspace.workspace_id,
+            db_host,
+            normalizedService,
+            db_user,
+            db_password,
+            requestedDbName,
+          ]
+        );
+
+        const updatedWorkspace = await pg_db.query(
+          `UPDATE workspace
+           SET db_id = $1, status = 'connected', updated_at = NOW()
+           WHERE user_id = $2 AND workspace_id = $3
+           RETURNING *;`,
+          [requestedDbName, user_id, workspace.workspace_id]
+        );
+        workspace = updatedWorkspace.rows[0] || workspace;
+      } else {
+        await mysql_db
+          .promise()
+          .query("DELETE FROM dbinfos WHERE user_id = ? AND db_name = ?;", [
+            user_id,
+            requestedDbName,
+          ]);
+
+        await mysql_db
+          .promise()
+          .query(
+            "INSERT INTO dbinfos (user_id, db_workspace, db_host, db_service, db_user, db_password, db_name) VALUES (?, ?, ?, ?, ?, ?, ?);",
+            [
+              user_id,
+              workspace.title || workspace.workspace_id,
+              db_host,
+              normalizedService,
+              db_user,
+              db_password,
+              requestedDbName,
+            ]
+          );
+
+        await mysql_db
+          .promise()
+          .query(
+            "UPDATE workspace SET db_id = ?, status = 'connected' WHERE user_id = ? AND workspace_id = ?;",
+            [requestedDbName, user_id, workspace.workspace_id]
+          );
+        workspace = { ...workspace, db_id: requestedDbName, status: "connected" };
+      }
+    }
+
     // Fetch database connection details from dbinfos table
     let dbInfo = null;
 
     if (process.env.LOCAL_DB_TYPE === "postgres") {
       const result = await pg_db.query(
         "SELECT * FROM dbinfos WHERE db_name = $1 AND user_id = $2;",
-        [db_name, user_id]
+        [workspace.db_id || requestedDbName, user_id]
       );
       dbInfo = result.rows[0] || null;
     } else {
       const [result] = await mysql_db
         .promise()
         .query("SELECT * FROM dbinfos WHERE db_name = ? AND user_id = ?;", [
-          db_name,
+          workspace.db_id || requestedDbName,
           user_id,
         ]);
       dbInfo = result && result[0] ? result[0] : null;
@@ -388,9 +476,12 @@ async function handleConnectWorkspaces(req, res) {
     console.log(`   User: ${db_user}`);
     console.log(`   Service: ${db_service}\n`);
     
+    let extractedSchema = null;
+
     // Extract schema from the database (non-blocking if fails)
     try {
       const schema = await extractSchema(db_service, config);
+      extractedSchema = schema;
       if (schema && Object.keys(schema).length > 0) {
         console.log(`✅ Found ${Object.keys(schema).length} tables in database:`);
         Object.keys(schema).forEach(table => {
@@ -490,6 +581,7 @@ async function handleConnectWorkspaces(req, res) {
       container_info: containerInfo,
       conversation_history: messages,
       message_count: messages.length,
+      schema: extractedSchema || {},
     });
   } catch (error) {
     console.error("Connect Workspace Error:", error);
@@ -665,6 +757,7 @@ async function handleWorkspaceQuery(req, res) {
       rows: execution.rows || [],
       fields: execution.fields || [],
       row_count: execution.rows?.length || 0,
+      schema,
     });
   } catch (error) {
     console.error("Workspace Query Error:", error);
